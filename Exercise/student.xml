@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+	<students>
+		<!--
+		学生信息表
+		"id" : [名字, 数学, 语文, 英语]
+-->
+		{
+		&quot;0&quot; : ['张三', 150, 120, 100],
+		&quot;1&quot; : ['李四', 90, 99, 95],
+		&quot;2&quot; : ['王五', 60, 66, 68],
+		}
+	</students>
+</root>
