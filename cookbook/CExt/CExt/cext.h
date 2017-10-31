@@ -6,7 +6,7 @@
 /* Compute the greatest common divisor */
 _declspec(dllexport) int gcd(int x, int y);
 
-/* Test if (x0,y0) is in the Mandelbrot set or not */
+/* Test if (x0, y0) is in the Mandelbrot set or not */
 _declspec(dllexport) int inMandelbrot(double x0, double y0, int n);
 
 /* Divide two numbers */
@@ -16,9 +16,10 @@ _declspec(dllexport) int divide(int a, int b, int *remainder);
 _declspec(dllexport) double avg(double *a, int n);
 
 /* A C data structure */
-_declspec(dllexport) typedef struct SPoint {
-    double x;
-    double y;
+_declspec(dllexport) typedef struct SPoint
+{
+	double x;
+	double y;
 } Point;
 
 /* Function involving a C data structure */

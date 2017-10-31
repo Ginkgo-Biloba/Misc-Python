@@ -35,10 +35,10 @@ static PyObject* py_divide(PyObject* self, PyObject* args)
 /* 模块方法列表 */
 static PyMethodDef methodTable[] =
 {
-	{ "gcd", py_gcd, METH_VARARGS, "最大公约数" },
-	{ "in_mandelbrot", py_in_mandelbrot, METH_VARARGS, "Mandelbrot 集合测试" },
-	{ "divide", py_divide, METH_VARARGS, "整数除法" },
-	{ NULL, NULL, 0x0, NULL },
+	{"gcd", py_gcd, METH_VARARGS, "最大公约数"},
+	{"in_mandelbrot", py_in_mandelbrot, METH_VARARGS, "Mandelbrot 集合测试"},
+	{"divide", py_divide, METH_VARARGS, "整数除法"},
+	{NULL, NULL, 0x0, NULL},
 };
 
 /* 模块结构 */
