@@ -55,7 +55,7 @@ class DoubleArrayType:
 		value = ((ctypes.c_double) * len(param))(*param)
 		return value
 
-	fromTuple = from_list
+	from_tuple = from_list
 
 	# numpy.array 情形
 	def from_ndarray(self, param):
