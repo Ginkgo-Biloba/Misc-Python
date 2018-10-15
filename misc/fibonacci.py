@@ -31,7 +31,8 @@ def fibMatrix(n):
 
 
 def fibShift(n):
-	mask = 1 << (len(str(bin(n))) - 1)
+	# 其实应该减 1，但 0 的结果是 0，不能左移 -1 位
+	mask = 1 << n.bit_length() 
 	fkm1 = 1; fk = 0
 	mask = mask >> 1
 	while (mask):
