@@ -8,7 +8,7 @@ from io import StringIO
 
 fontString = """abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ
 <br>αβγδεζηθικλμνξοπρστυφχψω ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ
-<br>äæåàáâãçèéêëðìíîïöøòóôõñùúûüýþ ÄÆÅÀÁÂÃÇÈÉÊËÐÌÍÎÏÖØÒÓÔÕÑÙÚÛÜÝÞ
+<br>äæåàáâãçèéêëðìíîïöøòóôõœñùúûüýþ ÄÆÅÀÁÂÃÇÈÉÊËÐÌÍÎÏÖØÒÓÔÕÑÙÚÛÜÝÞ
 <br>1234567890+-_=~`!@#$%^&*,./\()[]{} 我能吞下玻璃而不傷身體
 <br>“微风迎客，软语伴茶。”「微風迎客，軟語伴茶。」我能吞下玻璃而不伤身体
 """
@@ -27,7 +27,8 @@ fontString = """abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ
 # bfl = filter(lambda x: (op.getsize(x) > 2**20), FontList) # 生成器
 # bfl = list(bfl).sort()
 
-bfl = ["FangSong",
+bfl = [
+	"FangSong",
 	"Gulim",
 	"KaiTi",
 	"Malgun Gothic", 
@@ -64,14 +65,14 @@ bfl = ["FangSong",
 	"XSung Sharp",
 	"Yu Gothic UI",
 	"Yu Mincho",
-	]
+]
 
 # 生成一个字体的显示文字
 def genStr(FontName:str, String:str=None):
 	if String is None:
 		String = FontName
 	return """
-<p style="font-family: {FN}; font-size:20px">{FN} ---------------------------------------- </p>
+<p style="font-family: {FN}; font-size:20px">{FN:-^60s}</p>
 <p style = "font-family: {FN}">{FS}</p>
 """.format(FN=FontName, FS=String)
 

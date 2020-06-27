@@ -2,6 +2,7 @@
 import ctypes
 from ctypes import c_ubyte, c_ushort, c_int, c_float
 from ctypes import ARRAY, POINTER
+from enum import IntEnum
 import math
 import os
 import os.path as osp
@@ -40,18 +41,8 @@ class RawProc:
 			POINTER(c_ushort), c_int, c_int, c_int, c_int, c_int
 		]
 		self.dll.raw_read.restype = None
-		self.dll.rgb2bgr.argtypes = [
-			POINTER(c_ubyte), POINTER(c_ubyte), c_int, c_int
-		]
-		self.dll.rgb2bgr.restype = None
 		##### Gamma Table #####
 		xs = np.linspace(0, 1, 65536)
-		# MATLAB
-		# https://www.mathworks.com/help/images/ref/lin2rgb.html
-		(a, b, c, d, g) = (1.055, -0.055, 12.92, 0.0031308, 1 / 2.4)
-		ys = np.where(xs < d, c * xs, a * np.power(xs, g) + b)
-		self.gtab24 = (ys * 65535 + 0.5).astype(np.uint16)
-		self.gtab24_8 = (self.gtab24 >> 8).astype(np.uint8)
 		# libpng NTSC
 		# http://libpng.org/pub/png/spec/1.2/PNG-GammaAppendix.html
 		(a, b, c, d, g) = (1.099, -0.099, 4.5, 0.018, 0.45)
@@ -59,13 +50,6 @@ class RawProc:
 		self.gtab22 = (ys * 65535 + 0.5).astype(np.uint16)
 		self.gtab22_8 = (self.gtab22 >> 8).astype(np.uint8)
 		##### Color Correction Matrix #####
-		# 来自 dcraw
-		self.rgb_cam = np.array([
-			[+1.26195443, -0.45776108, +0.19580664],
-			[-0.15059669, +1.13350368, +0.01709299],
-			[-0.01468136, -0.36106369, +1.37574506],
-		],
-			dtype=np.float32)
 		# 来自 Google HDR+ 的素材
 		self.rgb_cam = np.array([
 			[+1.65625, -0.71875, +0.0625],
@@ -197,7 +181,10 @@ class RawProc:
 				else:
 					print("cannot guess size from fsz {:d}".format(fsz))
 					return None
-			out = out.reshape((height, width))
+			if (out.shape[0] != height * width):
+				out = None
+			else:
+				out = out.reshape((height, width))
 			return out
 		shape = (height, width)
 		if (out is None):
@@ -215,10 +202,10 @@ class RawProc:
 RPC = RawProc()
 
 RawPattern = {
-	"RG/GB": 0x94949494,
-	"BG/GR": 0x16161616,
-	"GR/BG": 0x61616161,
-	"GB/RG": 0x49494949,
+	"RGGB": 0x94949494,
+	"BGGR": 0x16161616,
+	"GRBG": 0x61616161,
+	"GBRG": 0x49494949,
 }
 
 RawDemosaic = ["LIN", "WRONG", "PPG", "AHD"]
@@ -226,25 +213,60 @@ RawDemosaic = ["LIN", "WRONG", "PPG", "AHD"]
 ############################################################
 
 
+# 预定义一些手机格式
+class Phone(IntEnum):
+	OnePlus = 1
+	SamsungC1LSI = 11
+	SamsungC2LSI = 12
+	SamsungZ3LSI = 13
+
+
+DefaultPhone = Phone.SamsungC1LSI
+
+
 class RawHead:
-	""" 其实没啥用，就是当结构体用 """
 
 	def __init__(self):
 		self.name = ""
+		self.text = ""
+		self.pack = 0
+		self.patt = None
+		self.depth = 10
+		self.dark = 64
+		self.sat = 0
 		self.rows = 0
 		self.cols = 0
-		self.pack = 0
-		self.depth = 10
-		self.dark = 63
-		self.sat = 0
-		self.patt = None
 		self.gain = np.zeros(3, np.float32)
-		self.dq = 3
+		self.dmq = "AHD"
+
+	def loadphone(self):
+		phone = DefaultPhone
+		if phone is None:
+			pass
+		elif (phone is Phone.OnePlus):
+			self.text = self.name[:21]
+			self.patt = "RGGB"
+			self.cols, self.rows = 4000, 3000
+		elif (phone is Phone.SamsungC1LSI or phone is Phone.SamsungZ3LSI):
+			self.text = self.name[:-17]
+			self.patt = "GRBG"
+			self.depth = 12
+			self.dark = 0
+			self.cols, self.rows = 4032, 3024
+		elif (phone is Phone.SamsungC2LSI):
+			self.text = self.name[:-17]
+			self.patt = "GRBG"
+			self.depth = 12
+			self.dark = 0
+			self.cols, self.rows = 4000, 3000
+		else:
+			pass
+		self.text += ".txt"
 
 
 def dngRead(h: RawHead):
-	p = subprocess.run([r"G:\Sample\cvtraw\dcraw.exe", "-i", "-v", h.name],
-		stdout=subprocess.PIPE)
+	p = r"G:\Collaboration\cvtraw\dcraw.exe"
+	p = subprocess.run([p, "-i", "-v", h.name], stdout=subprocess.PIPE)
 	outs = p.stdout.decode("utf-8").split("\n")
 	for line in outs:
 		kv = line.split(":")
@@ -279,17 +301,12 @@ def dngRead(h: RawHead):
 
 
 def txtRead(h: RawHead):
-	(h.cols, h.rows) = (4000, 3000)
-	h.pack = 1
-	h.depth = 10
-	h.dark = 64
-	h.patt = "RG/GB"
-	txt = h.name[:3] + ".txt"
+	h.loadphone()
 	# txt = h.name[:13] + "_{:d}x{:d}.txt".format(h.cols, h.rows)
 	# 上面设置 raw 的属性和 txt 的名字
-	if not (osp.isfile(txt)):
+	if not (osp.isfile(h.text)):
 		return
-	fid = open(txt, "r")
+	fid = open(h.text, "r")
 	if (not fid.readable()):
 		return
 	for line in fid:
@@ -302,48 +319,46 @@ def txtRead(h: RawHead):
 			h.gain[0] = float(kv[1])
 		elif (kv[0] == "blueGain"):
 			h.gain[2] = float(kv[1])
-		elif (kv[0] == "blackLevel[0]"):
+		elif (kv[0] == "blackLevel"):
 			h.dark = int(kv[1])
-	if (1 < h.gain[0] or 1 < h.gain[2]):
+	if (0 < h.gain[0] and 0 < h.gain[2]):
 		h.gain[1] = 1
 	fid.close()
 
 
 def cvtHead(h: RawHead):
-	"""
-	在主函数里面把所有数据（图像和属性）预处理，按组构成列表。
-	使得有这么一个函数，它可以处理这一个或一组 Raw。
-	然后使用进程池，在每一组图像上应用函数。
-	"""
 	raw = None
-	# if ((h.rows < 0) or (h.cols < 0) or ((h.rows | h.cols) % 2 != 0)):
-	# 	return False
 	if (h.name.lower().endswith(".dng")):
 		raw = dngRead(h)
-	else:  #(h.name.lower().endswith(".raw")):
+	else:
+		# (h.name.lower().endswith(".raw")):
 		txtRead(h)
 		raw = RPC.read(h.name, h.rows, h.cols, h.depth, h.pack)
 	if (raw is None):
-		print("{:s} | read failed".format(h.name))
+		info = " ❌  {:s} -> read failed".format(h.name)
+		print(info)
 		return False
 	if (h.sat <= h.dark and 0 < h.depth):
 		h.sat = 2**h.depth - 1
+	raw.astype(np.int16, copy=False).clip(0, None, out=raw)
 	hrpat = RawPattern[h.patt]
 	RPC.scale(raw, h.depth, h.dark, h.sat, out=raw)
 	if (h.gain is None or h.gain[0] < 0.1):
 		RPC.estgain(raw, hrpat, out=h.gain)
-		print(h.name, "  -> estimated gain", h.gain)
+		info = " ⭕  {:s} -> estimated gain".format(h.name, h.gain)
+		print(info)
 	RPC.wbgain(raw, h.gain, hrpat, out=raw)
-	rgb = RPC.demosaic(raw, hrpat, h.dq)
-	RPC.cam2linear(rgb, out=rgb)
-	img = Image.fromarray(RPC.gtab22_8[rgb], "RGB")
-	pre, ext = osp.splitext(h.name)
-	img.save(pre + ".bmp")
-	info = h.name
-	info += "  {:d}×{:d}".format(h.cols, h.rows)
+	ext = RPC.demosaic(raw, hrpat, RawDemosaic.index(h.dmq))
+	RPC.cam2linear(ext, out=ext)
+	img = Image.fromarray(RPC.gtab22_8[ext], "RGB")
+	ext = osp.splitext(h.name)[0] + ".tiff"
+	img.save(ext)
+	info = "️ ✔"
 	info += "  {:s}  [{:d}, {:d}]".format(h.patt, h.dark, h.sat)
+	info += "  {:d}×{:d}".format(h.cols, h.rows)
 	info += "  [{:.3f}, {:.3f}, {:.3f}]".format(h.gain[0], h.gain[1], h.gain[2])
-	info += "  {:s}".format(RawDemosaic[h.dq])
+	info += "  {:s}".format(h.dmq)
+	info += "  {:s}".format(ext)
 	print(info)
 	return True
 
@@ -355,12 +370,11 @@ if (__name__ == "__main__"):
 	import time
 	from multiprocessing import pool
 	tick = time.time()
-	EXTS = (".dng", ".rawmipi")
-	olddir = os.getcwd()
+	EXTS = (".dng", ".raw")
+	os.chdir(r"G:\Sample\Samsung\0619C1LSI")
 	if (len(sys.argv) > 1):
 		os.chdir(sys.argv[1])
 		print("change directory to", sys.argv[1])
-	os.chdir(r"..\video")
 	names = os.listdir(".")
 	rawhs = list()
 	for x in names:
@@ -368,15 +382,16 @@ if (__name__ == "__main__"):
 		ext = ext.lower()
 		if not (ext in EXTS):
 			continue
+		if (x.find("_10_") == -1):
+			continue
 		h = RawHead()
 		h.name = x
 		rawhs.append(h)
 	ret = [0]
 	pp = pool.Pool()
-	# ret = pp.map(cvtHead, rawhs)
-	cvtHead(rawhs[2])
+	ret = pp.map(cvtHead, rawhs)
+	# cvtHead(rawhs[0])
 	ret = sum(ret)
-	os.chdir(olddir)
 	tick = time.time() - tick
 	print("=" * 60)
 	print("{:d} success(es), {:d} failure(s), {:.3f} seconds".format(

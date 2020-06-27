@@ -5,11 +5,8 @@
 #include <cmath>
 #include <cassert>
 
-/* 单线程，需要的话外部 Python 开多进程
- * 这里不做、也没法做尺寸和指针检查
+/* 
  * 需要 Python 保证传入尺寸正确并且数组内存连续
- *
- * bayer pattern
  * BGGR            GRBG           GBRG            RGGB
  * 0x16161616      0x61616161     0x49494949      0x94949494
  */
@@ -22,7 +19,6 @@
 #  error must export function for Python
 #endif
 
-static_assert(1, "");
 
 using uchar = unsigned char;
 using ushort = unsigned short;
@@ -105,7 +101,6 @@ est_wbgain(ushort const* byr, int height, int width, int pat, float* wbrgb)
 }
 
 
-/* 填充 bayer 到 RGB 对应颜色位置，dst 尺寸是 src 一半 */
 static void fill_bgr(ushort const* src, vec3w* dst,
 	int height, int width, int pat)
 {
@@ -131,7 +126,6 @@ static void fill_bgr(ushort const* src, vec3w* dst,
 }
 
 
-/* 插值边界 */
 static void border_interpolate(vec3w* img,
 	unsigned height, unsigned width, unsigned border, int pat)
 {
@@ -167,7 +161,6 @@ static void border_interpolate(vec3w* img,
 }
 
 
-/* rgb -> lab */
 static void cielab(ushort const* rgb, short* lab)
 {
 	float xyz[3];
@@ -490,14 +483,11 @@ static void ahd_interpolate(ushort(*img)[3], int height, int width, int pat)
 	free(buffer);
 }
 
-/* method
+/* 
+ * method
  * - 0 LIN
- *   Bi-linear
  * - 2 PPG
- *   Patterned Pixel Grouping Interpolation by Alain Desbiolles
  * - 3 AHD
- *   Adaptive Homogeneity-Directed interpolation
- *   by Keigo Hirakawa, Thomas Parks, and Paul Lee
  */
 CExport void
 demosaic(ushort const* byr, ushort(*img)[3], int height, int width, int pat,
@@ -515,19 +505,18 @@ demosaic(ushort const* byr, ushort(*img)[3], int height, int width, int pat,
 }
 
 
-/* 读取 raw
-* pack
-* - 0 不压缩，可以直接用 numpy 读，不用进来
-* - 1 交错存储，类似于 Mipi 那种
-* - 2 连续存储
-* 为什么不传文件名？你懂的
-*/
+/*
+ * pack
+ * - 0 不压缩，可以直接用 numpy 读
+ * - 1 交错存储，类似于 Mipi 那种
+ * - 2 连续存储
+ */
 CExport void
 raw_read(uchar const* P, ushort* S, int buflen, int height, int width,
 	int depth, int pack)
 {
 	int rowoff = buflen / height - width * depth / 8;
-	assert(buflen % height == 0);
+	// assert(buflen % height == 0);
 	assert((height | width) % 2 == 0);
 	assert(depth % 2 == 0 && 8 < depth && depth <= 16);
 	assert(0 <= pack && pack <= 2);
@@ -535,10 +524,7 @@ raw_read(uchar const* P, ushort* S, int buflen, int height, int width,
 	assert(buflen * 8 >= depth * width * height);
 
 	if (pack == 0)
-	{
-		/* 直接复制可能不行，因为有大小端问题 */
 		memcpy(S, P, sizeof(ushort) * height * width);
-	}
 	else if (pack == 1 && depth != 14)
 		for (int h = 0; h < height; ++h)
 		{
@@ -597,30 +583,4 @@ raw_read(uchar const* P, ushort* S, int buflen, int height, int width,
 			P += rowoff;
 			S += width;
 		}
-}
-
-
-CExport void
-rgb2bgr(uchar const* src, uchar* dst, int height, int width)
-{
-	assert(width * 3 < INT_MAX);
-	width *= 3;
-	if (static_cast<int64_t>(height) * width * 3
-		== static_cast<int64_t>(height * width * 3))
-	{
-		width *= height;
-		height = 1;
-	}
-
-	for (int h = 0; h < height; ++h)
-	{
-		uchar const* S = src + h * width;
-		uchar* D = dst + h * width;
-		for (int w = 0; w < width; w += 3)
-		{
-			/* 注意原位操作 */
-			uchar t0 = S[w], t2 = S[w + 2];
-			D[w] = t2; D[w + 1] = S[w + 1]; D[w + 2] = t0;
-		}
-	}
 }
