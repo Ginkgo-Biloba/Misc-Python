@@ -1,23 +1,20 @@
-# coding=utf-8
-import ctypes
+﻿import ctypes
 from ctypes import c_ubyte, c_ushort, c_int, c_float
 from ctypes import ARRAY, POINTER
 from enum import IntEnum
 import math
 import os
 import os.path as osp
+import sys
+import time
+import subprocess
 import numpy as np
 from PIL import Image
-import subprocess
 
 
 class RawProc:
 	"""
-	将成员 dll 实现成类似于 C++ 的静态变量初始化？
-	效率起见：
-	- 为了可以多进程处理，类里面不包含任何与图像有关的数据。
-	- 最好只构造化一个实例，函数都在它上面调用。
-	- 和 Numpy 里面函数类似，如果有参数 out，类型和大小需要满足要求。
+	和 Numpy 类似，如果有参数 out，类型和大小需要满足要求
 	"""
 
 	def __init__(self):
@@ -47,8 +44,7 @@ class RawProc:
 		# http://libpng.org/pub/png/spec/1.2/PNG-GammaAppendix.html
 		(a, b, c, d, g) = (1.099, -0.099, 4.5, 0.018, 0.45)
 		ys = np.where(xs < d, c * xs, a * np.power(xs, g) + b)
-		self.gtab22 = (ys * 65535 + 0.5).astype(np.uint16)
-		self.gtab22_8 = (self.gtab22 >> 8).astype(np.uint8)
+		self.gtab = (ys * 255).astype(np.uint8)
 		##### Color Correction Matrix #####
 		# 来自 Google HDR+ 的素材
 		self.rgb_cam = np.array([
@@ -61,11 +57,12 @@ class RawProc:
 	def fcol(self, r, c, pat):
 		return 3 & (pat >> (2 * (2 * (r & 1) + (c & 1))))
 
-	def scale(self, byr, depth, dark, sat=0, *, out=None):
-		if (sat <= dark):
-			sat = 2**depth - 1
-		fdark = np.array([dark], dtype=np.float32)
-		frate = np.array([65535.0 / (sat - dark)], dtype=np.float32)
+	def scale(self, byr, rbit, darkness, saturate=0, *, out=None):
+		if (saturate <= darkness):
+			saturate = 2**rbit - 1
+		assert (darkness < saturate)
+		fdark = np.array([darkness], dtype=np.float32)
+		frate = np.array([65535.0 / (saturate - darkness)], dtype=np.float32)
 		if (out is None):
 			out = np.empty_like(byr)
 		assert out.shape == byr.shape and out.dtype == byr.dtype
@@ -73,7 +70,6 @@ class RawProc:
 		return out
 
 	def estgain(self, byr, pat, *, out=None):
-		" 这里的 out 是为了可以更改外面的数据 "
 		height = byr.shape[0]
 		width = byr.shape[1]
 		if (out is None):
@@ -88,16 +84,16 @@ class RawProc:
 		self.dll.est_wbgain(src, c_int(height), c_int(width), c_int(pat), dst)
 		return out
 
-	def wbgain(self, byr, gain, pat, *, out=None):
-		"gain 是三个数的 np.float32，RGB 顺序"
+	def wbgain(self, byr, wb, pat, *, out=None):
+		"wb 是三个数的 np.float32，RGB 顺序"
 		w2 = byr.shape[1] // 2
-		assert gain.shape[0] == 3 and gain.dtype == np.float32
+		assert wb.shape[0] == 3 and wb.dtype == np.float32
 		if (out is None):
 			out = np.empty_like(byr)
 		assert out.shape == byr.shape and out.dtype == byr.dtype
 		mul4 = np.array([
-			[gain[self.fcol(0, 0, pat)], gain[self.fcol(0, 1, pat)]],
-			[gain[self.fcol(1, 0, pat)], gain[self.fcol(1, 1, pat)]],
+			[wb[self.fcol(0, 0, pat)], wb[self.fcol(0, 1, pat)]],
+			[wb[self.fcol(1, 0, pat)], wb[self.fcol(1, 1, pat)]],
 		], np.float32)
 		mul = np.repeat(mul4, w2, 0).reshape((1, -1))
 		b2 = byr.reshape((-1, 4 * w2))
@@ -139,31 +135,20 @@ class RawProc:
 		np.clip(np.matmul(src, rmul) + self.rd5, 0, 65535, out=dst)
 		return out
 
-	def rgb2bgr(self, rgb, *, out=None):
-		assert rgb.ndim == 3 and rgb.dtype == np.uint8
-		assert rgb.flags['C_CONTIGUOUS'] and out.flags['ALIGNED']
-		if (out is None):
-			out = np.empty_like(rgb)
-		assert out.ndim == 3 and out.dtype == np.uint8 and out.shape == rgb.shape
-		assert out.flags['C_CONTIGUOUS'] and out.flags['ALIGNED']
-		self.dll.rgb2bgr(rgb.ctypes.data_as(POINTER(c_ubyte)),
-			out.ctypes.data_as(POINTER(c_ubyte)), c_int(rgb.shape[0]),
-			c_int(rgb.shape[1]))
-		return out
-
-	def guess_size(self, fsz, size, wr, hr):
-		mul = wr * hr
-		if (fsz // mul * mul != fsz):
-			return False
-		fsz = fsz // mul
-		mul = int(math.sqrt(float(fsz)))
-		if (mul * mul != fsz):
-			return False
-		size[0] = wr * mul
-		size[1] = hr * mul
+	def guess(self, fsz, size, wr, hr):
+		if (size[0] <= 2 or size[1] <= 2):
+			mul = wr * hr
+			if (fsz // mul * mul != fsz):
+				return False
+			fsz = fsz // mul
+			mul = int(math.sqrt(float(fsz)))
+			if (mul * mul != fsz):
+				return False
+			size[0] = wr * mul
+			size[1] = hr * mul
 		return True
 
-	def read(self, fname, height, width, depth, pack, *, out=None):
+	def read(self, fname, height, width, rbit, pack, *, out=None):
 		" pack: 0 不打包，1 交错存储，2 连续存储 "
 		if not osp.isfile(fname):
 			return None
@@ -172,8 +157,10 @@ class RawProc:
 			fsz = out.shape[0]
 			if (height < 2 or width < 2):
 				size = [-1, -1]
-				(self.guess_size(fsz, size, 4, 3) or self.guess_size(fsz, size, 16, 9)
-					or self.guess_size(fsz, size, 1, 1))
+				self.guess(fsz, size, 4, 3)
+				self.guess(fsz, size, 16, 9)
+				self.guess(fsz, size, 5, 4)
+				self.guess(fsz, size, 1, 1)
 				width = size[0]
 				height = size[1]
 				if (width > 0 and height > 0):
@@ -195,77 +182,100 @@ class RawProc:
 		buflen = buf.shape[0]
 		self.dll.raw_read(buf.ctypes.data_as(POINTER(c_ubyte)),
 			out.ctypes.data_as(POINTER(c_ushort)), c_int(buflen),
-			c_int(height), c_int(width), c_int(depth), c_int(pack))
+			c_int(height), c_int(width), c_int(rbit), c_int(pack))
 		return out
 
 
 RPC = RawProc()
 
 RawPattern = {
-	"RGGB": 0x94949494,
-	"BGGR": 0x16161616,
-	"GRBG": 0x61616161,
-	"GBRG": 0x49494949,
+	"rggb": 0x94949494,
+	"bggr": 0x16161616,
+	"grbg": 0x61616161,
+	"gbrg": 0x49494949,
 }
 
-RawDemosaic = ["LIN", "WRONG", "PPG", "AHD"]
+RawPack = ["none", "mipi", "cont"]
+
+RawDemosaic = ["lin", "xxx", "ppg", "ahd"]
 
 ############################################################
 
 
-# 预定义一些手机格式
 class Phone(IntEnum):
-	OnePlus = 1
-	SamsungC1LSI = 11
-	SamsungC2LSI = 12
-	SamsungZ3LSI = 13
+	" 预定义一些手机格式 "
+	OnePlusIMX586 = 101
+	SamsungC1LSI = 201
+	SamsungC2LSI = 202
+	SamsungZ3LSI = 203
+	SamsungC2QC = 204
+	VivoSample = 301
+	VivoPreview = 302
+	MeizuIMX686 = 401
 
 
-DefaultPhone = Phone.SamsungC1LSI
+DefaultPhone = Phone.SamsungC2QC
 
 
 class RawHead:
 
 	def __init__(self):
-		self.name = ""
+		self.name = None
 		self.text = ""
-		self.pack = 0
-		self.patt = None
-		self.depth = 10
-		self.dark = 64
-		self.sat = 0
-		self.rows = 0
-		self.cols = 0
-		self.gain = np.zeros(3, np.float32)
-		self.dmq = "AHD"
+		self.pack = "none"
+		self.patt = "bggr"
+		self.rbit = 10
+		self.darkness, self.saturate = 64, 0
+		self.cols, self.rows = 4000, 3000
+		self.isp = 2.0
+		self.wb = np.ones(3, np.float32)
+		self.demq = "ahd"
 
 	def loadphone(self):
 		phone = DefaultPhone
 		if phone is None:
-			pass
-		elif (phone is Phone.OnePlus):
+			self.text, _ = osp.splitext(self.name)
+		elif (phone == Phone.OnePlusIMX586):
 			self.text = self.name[:21]
-			self.patt = "RGGB"
-			self.cols, self.rows = 4000, 3000
-		elif (phone is Phone.SamsungC1LSI or phone is Phone.SamsungZ3LSI):
+			self.patt = "rggb"
+		elif (phone == Phone.SamsungC1LSI) or (phone == Phone.SamsungZ3LSI):
 			self.text = self.name[:-17]
-			self.patt = "GRBG"
-			self.depth = 12
-			self.dark = 0
+			self.patt = "grbg"
+			self.rbit = 12
+			self.darkness = 0
 			self.cols, self.rows = 4032, 3024
-		elif (phone is Phone.SamsungC2LSI):
+		elif (phone == Phone.SamsungC2LSI):
 			self.text = self.name[:-17]
-			self.patt = "GRBG"
-			self.depth = 12
-			self.dark = 0
-			self.cols, self.rows = 4000, 3000
+			self.patt = "grbg"
+			self.rbit = 12
+			self.darkness = 0
+		elif (phone == Phone.SamsungC2QC):
+			self.text = self.name[:-4]
+			self.patt = "grbg"
+		elif (phone == Phone.VivoSample):
+			self.text = self.name[:24] + "_fn0_in_0_10bit"
+			self.pack = "mipi"
+			self.cols, self.rows = 4080, 3060
+		elif (phone == Phone.VivoPreview):
+			self.text = self.name[:24] + "_fn0_in_0_10bit"
+			self.patt = "gbrg"
+			self.wb = np.ones(3, np.float32)
+			self.rbit = 14
+			self.darkness = 0
+			self.cols, self.rows = 4080, 3060
+		elif (phone == Phone.MeizuIMX686):
+			self.text = self.name[:-6]
+			self.patt = "rggb"
+			self.rbit = 14
+			self.darkness = 1024
+			self.cols, self.rows = 4624, 3472
 		else:
 			pass
 		self.text += ".txt"
 
 
 def dngRead(h: RawHead):
-	p = r"G:\Collaboration\cvtraw\dcraw.exe"
+	p = r"G:\Sample\cvtraw\dcraw.exe"
 	p = subprocess.run([p, "-i", "-v", h.name], stdout=subprocess.PIPE)
 	outs = p.stdout.decode("utf-8").split("\n")
 	for line in outs:
@@ -283,7 +293,7 @@ def dngRead(h: RawHead):
 		elif (kv[0] == "Camera multipliers"):
 			cammul = kv[1].split(" ")
 			cammul = list(map(float, cammul))
-			h.gain = np.array(cammul[:-1], np.float32)
+			h.wb = np.array(cammul[:-1], np.float32)
 	if ((h.rows < 2) or (h.cols < 2) or ((h.rows | h.cols) % 2)):
 		return None
 	szexp = h.rows * h.cols * 2
@@ -316,49 +326,67 @@ def txtRead(h: RawHead):
 		kv[0] = kv[0].strip()
 		kv[1] = kv[1].strip()
 		if (kv[0] == "redGain"):
-			h.gain[0] = float(kv[1])
+			h.wb[0] = float(kv[1])
 		elif (kv[0] == "blueGain"):
-			h.gain[2] = float(kv[1])
-		elif (kv[0] == "blackLevel"):
-			h.dark = int(kv[1])
-	if (0 < h.gain[0] and 0 < h.gain[2]):
-		h.gain[1] = 1
+			h.wb[2] = float(kv[1])
+		elif (kv[0] == "wbbgr"):
+			swb = kv[1].split(",")
+			swb = list(map(float, swb))
+			h.wb = np.array(swb, np.float32)
+		elif (kv[0] == "rawformat"):
+			h.patt = kv[1]
+		elif (kv[0] == "rawdepth"):
+			h.rbit = int(kv[1])
+		elif (kv[0] == "blacklevel"):
+			h.darkness = int(kv[1])
+		elif (kv[0] == "whitelevel"):
+			h.saturate = int(kv[1])
+		elif (kv[0] == "rawsize"):
+			ssz = kv[1].split("x")
+			ssz = list(map(int, ssz))
+			h.cols, h.rows = ssz[0], ssz[1]
+	if (0 < h.wb[0] and 0 < h.wb[2]):
+		h.wb[1] = 1
+	h.wb *= h.isp
 	fid.close()
 
 
 def cvtHead(h: RawHead):
 	raw = None
+	pack = RawPack.index(h.pack)
 	if (h.name.lower().endswith(".dng")):
 		raw = dngRead(h)
 	else:
-		# (h.name.lower().endswith(".raw")):
 		txtRead(h)
-		raw = RPC.read(h.name, h.rows, h.cols, h.depth, h.pack)
+		pack = RawPack.index(h.pack)
+		raw = RPC.read(h.name, h.rows, h.cols, h.rbit, pack)
+	patt = RawPattern[h.patt]
 	if (raw is None):
 		info = " ❌  {:s} -> read failed".format(h.name)
 		print(info)
 		return False
-	if (h.sat <= h.dark and 0 < h.depth):
-		h.sat = 2**h.depth - 1
+	if (h.saturate <= h.darkness and 0 < h.rbit):
+		h.saturate = 2**h.rbit - 1
+	assert (h.darkness < h.saturate)
 	raw.astype(np.int16, copy=False).clip(0, None, out=raw)
-	hrpat = RawPattern[h.patt]
-	RPC.scale(raw, h.depth, h.dark, h.sat, out=raw)
-	if (h.gain is None or h.gain[0] < 0.1):
-		RPC.estgain(raw, hrpat, out=h.gain)
-		info = " ⭕  {:s} -> estimated gain".format(h.name, h.gain)
+	RPC.scale(raw, h.rbit, h.darkness, h.saturate, out=raw)
+	if (h.wb is None or h.wb[0] < 0.1):
+		RPC.estgain(raw, patt, out=h.wb)
+		info = " ⚙️  {:s} -> estimated wb".format(h.name, h.wb)
 		print(info)
-	RPC.wbgain(raw, h.gain, hrpat, out=raw)
-	ext = RPC.demosaic(raw, hrpat, RawDemosaic.index(h.dmq))
-	RPC.cam2linear(ext, out=ext)
-	img = Image.fromarray(RPC.gtab22_8[ext], "RGB")
-	ext = osp.splitext(h.name)[0] + ".tiff"
-	img.save(ext)
-	info = "️ ✔"
-	info += "  {:s}  [{:d}, {:d}]".format(h.patt, h.dark, h.sat)
-	info += "  {:d}×{:d}".format(h.cols, h.rows)
-	info += "  [{:.3f}, {:.3f}, {:.3f}]".format(h.gain[0], h.gain[1], h.gain[2])
-	info += "  {:s}".format(h.dmq)
-	info += "  {:s}".format(ext)
+	RPC.wbgain(raw, h.wb, patt, out=raw)
+	rgb = RPC.demosaic(raw, patt, RawDemosaic.index(h.demq))
+	RPC.cam2linear(rgb, out=rgb)
+	img = Image.fromarray(RPC.gtab[rgb], "RGB")
+	ext = osp.splitext(h.name)[0] + ".jpg"
+	img.save(ext, subsampling=0, quality=90)
+	info = " ✔  "
+	info += " {:s} {:s} [{:d}, {:d}]".format(h.pack, h.patt, h.darkness,
+		h.saturate)
+	info += " {:d}×{:d}".format(h.cols, h.rows)
+	info += " [{:.3f}, {:.3f}, {:.3f}]".format(h.wb[0], h.wb[1], h.wb[2])
+	info += " {:s}".format(h.demq)
+	info += " {:s}".format(ext)
 	print(info)
 	return True
 
@@ -366,34 +394,32 @@ def cvtHead(h: RawHead):
 ############################################################
 
 if (__name__ == "__main__"):
-	import sys
-	import time
 	from multiprocessing import pool
 	tick = time.time()
-	EXTS = (".dng", ".raw")
-	os.chdir(r"G:\Sample\Samsung\0619C1LSI")
+	EXTS = (".dng", ".raw", ".rawmipi", ".raw14gbrg16")
+	# os.system("chcp 65001")
 	if (len(sys.argv) > 1):
 		os.chdir(sys.argv[1])
 		print("change directory to", sys.argv[1])
 	names = os.listdir(".")
 	rawhs = list()
+	nsels = list(map("_{:02d}".format, range(14, 20)))
 	for x in names:
 		_, ext = osp.splitext(x)
 		ext = ext.lower()
 		if not (ext in EXTS):
 			continue
-		if (x.find("_10_") == -1):
-			continue
+		if (all(map(lambda s: x.find(s) == -1, nsels))):
+			pass
 		h = RawHead()
 		h.name = x
 		rawhs.append(h)
 	ret = [0]
-	pp = pool.Pool()
+	pp = pool.Pool(min(os.cpu_count(), 6))
 	ret = pp.map(cvtHead, rawhs)
 	# cvtHead(rawhs[0])
 	ret = sum(ret)
 	tick = time.time() - tick
-	print("=" * 60)
-	print("{:d} success(es), {:d} failure(s), {:.3f} seconds".format(
-		ret,
-		len(rawhs) - ret, tick))
+	info = "\n{:d} success(es), {:d} failure(s), {:.3f} seconds\n"
+	info = info.format(ret, len(rawhs) - ret, tick)
+	print("=" * 60 + info)

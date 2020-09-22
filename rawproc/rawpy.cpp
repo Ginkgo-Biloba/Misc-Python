@@ -483,12 +483,7 @@ static void ahd_interpolate(ushort(*img)[3], int height, int width, int pat)
 	free(buffer);
 }
 
-/* 
- * method
- * - 0 LIN
- * - 2 PPG
- * - 3 AHD
- */
+
 CExport void
 demosaic(ushort const* byr, ushort(*img)[3], int height, int width, int pat,
 	int method)
@@ -505,27 +500,20 @@ demosaic(ushort const* byr, ushort(*img)[3], int height, int width, int pat,
 }
 
 
-/*
- * pack
- * - 0 不压缩，可以直接用 numpy 读
- * - 1 交错存储，类似于 Mipi 那种
- * - 2 连续存储
- */
 CExport void
 raw_read(uchar const* P, ushort* S, int buflen, int height, int width,
 	int depth, int pack)
 {
-	int rowoff = buflen / height - width * depth / 8;
-	// assert(buflen % height == 0);
+	int line = width * depth / 8;
+	int step = (line + 15) & -16;
 	assert((height | width) % 2 == 0);
-	assert(depth % 2 == 0 && 8 < depth && depth <= 16);
+	assert(!pack || (depth == 10 || depth == 12));
 	assert(0 <= pack && pack <= 2);
-	assert(pack == 0 || depth != 16);
-	assert(buflen * 8 >= depth * width * height);
+	assert(step * height <= buflen);
 
 	if (pack == 0)
 		memcpy(S, P, sizeof(ushort) * height * width);
-	else if (pack == 1 && depth != 14)
+	else if (pack == 1)
 		for (int h = 0; h < height; ++h)
 		{
 			// 5 -> 4
@@ -546,15 +534,10 @@ raw_read(uchar const* P, ushort* S, int buflen, int height, int width,
 					S[i + 1] = (P[1] << 4) | ((P[2] >> 4) & 0xf);
 					P += 3;
 				}
-			// 7 -> 4
-			else if (depth == 14)
-				for (int i = 0; i < width; i += 4)
-				{
-				}
-			P += rowoff;
+			P += step - line;
 			S += width;
 		}
-	else if (pack == 2 && depth != 14)
+	else if (pack == 2)
 		for (int h = 0; h < height; ++h)
 		{
 			// 8+2, 6+4, 4+6, 2+8
@@ -575,12 +558,7 @@ raw_read(uchar const* P, ushort* S, int buflen, int height, int width,
 					S[i + 1] = ((P[1] >> 4) & 0xf) | (P[2] << 4);
 					P += 3;
 				}
-			// 8+6, 2+8+4, 4+8+2, 6+8
-			else if (depth == 14)
-				for (int i = 0; i < width; i += 4)
-				{
-				}
-			P += rowoff;
+			P += step - line;
 			S += width;
 		}
 }
